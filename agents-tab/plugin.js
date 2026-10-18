@@ -26,6 +26,13 @@ async function exec(command) {
   return res.stdout || ''
 }
 
+function crumb(event, detail = {}) {
+  try {
+    const line = b64(JSON.stringify({ t: new Date().toISOString(), event, ...detail }) + '\n')
+    void host.request('shell.exec', { command: `echo ${line} | base64 -d >> "$HOME/.hermes/agents-tab.log"` }).catch(() => {})
+  } catch {}
+}
+
 let ready = null
 function ensureScript() {
   if (!ready) {
@@ -155,6 +162,7 @@ export default {
   id: ID,
   name: 'Agents tab',
   register(ctx) {
+    crumb('loaded', { openWorkspace: typeof host.openWorkspace })
     ctx.register({
       id: 'pane',
       area: 'panes',
@@ -167,7 +175,10 @@ export default {
         tabTitleText: () => 'Agents',
         dock: { pane: 'sessions', pos: 'center', enforce: true }
       },
-      render: () => jsx(AgentsTab, {})
+      render: () => {
+        crumb('render')
+        return jsx(AgentsTab, {})
+      }
     })
   }
 }
