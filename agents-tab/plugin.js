@@ -3,12 +3,14 @@
  * backend, each with its helper agents drawn as a tree underneath. Click a row to open the chat.
  * Data: agents.py (embedded below, written to ~/.hermes/agents-tab/ on the backend) reads each
  * profile's state.db read only; session.active_list adds working / needs you for live chats.
+ * Background agents: every Codex, Claude Code, Grok, OpenCode or one-shot Hermes run on the backend
+ * (any user, any launcher), named after its agent-run unit when it has one, finished ones ticked for 30 min.
  */
 import { host, useQuery, useValue, atom } from '@hermes/plugin-sdk'
 import { jsx, jsxs, Fragment } from 'react/jsx-runtime'
 
 const ID = 'agents-tab'
-const PY_SRC = "\"\"\"Agents tab data: running chats per profile with their helper agents, read only from state.db.\"\"\"\nimport json, os, sqlite3, sys, time\nfrom pathlib import Path\n\nHOME = Path(os.environ.get(\"HERMES_HOME\") or Path.home() / \".hermes\")\nNOW = time.time()\nACTIVE = 150      # a chat counts as running if it did something in the last 150 s\nCHILD_LIVE = 900  # an unfinished helper counts as live if it did something in the last 15 min\nDONE_KEEP = 300   # finished helpers stay listed (ticked) for 5 min\n\n\ndef homes():\n    yield \"default\", HOME\n    pdir = HOME / \"profiles\"\n    if pdir.is_dir():\n        for p in sorted(pdir.iterdir()):\n            if (p / \"state.db\").exists():\n                yield p.name, p\n\n\ndef read(profile, home):\n    try:\n        db = sqlite3.connect(f\"file:{home / 'state.db'}?mode=ro\", uri=True, timeout=2)\n    except sqlite3.Error:\n        return []\n    db.row_factory = sqlite3.Row\n    since = NOW - CHILD_LIVE\n    try:\n        kids = db.execute(\n            \"select id, parent_session_id, title, ended_at, last_activity_at, started_at from sessions \"\n            \"where parent_session_id is not null and title like 'Subagent:%' \"\n            \"and coalesce(last_activity_at, started_at) > ?\", (since,)).fetchall()\n        recent = db.execute(\n            \"select id, title, source, last_activity_at, started_at from sessions \"\n            \"where coalesce(last_activity_at, started_at) > ? and coalesce(hidden,0)=0 and coalesce(archived,0)=0 \"\n            \"and (title is null or title not like 'Subagent:%') and source not in ('oneshot','subagent')\",\n            (NOW - ACTIVE,)).fetchall()\n        parents = {r[\"id\"]: dict(r) for r in recent}\n        need = {k[\"parent_session_id\"] for k in kids} - set(parents)\n        for pid in need:\n            r = db.execute(\"select id, title, source, last_activity_at, started_at from sessions where id=?\", (pid,)).fetchone()\n            if r:\n                parents[pid] = dict(r)\n    except sqlite3.Error:\n        return []\n    finally:\n        pass\n    out = []\n    for pid, p in parents.items():\n        helpers = []\n        for k in kids:\n            if k[\"parent_session_id\"] != pid:\n                continue\n            done = k[\"ended_at\"] is not None\n            if done and NOW - k[\"ended_at\"] > DONE_KEEP:\n                continue\n            title = (k[\"title\"] or \"Helper\").replace(\"Subagent:\", \"\", 1).strip().rstrip(\"\u2026\").strip()\n            helpers.append({\"t\": title[:80], \"d\": done, \"s\": int(NOW - (k[\"started_at\"] or NOW))})\n        last = p.get(\"last_activity_at\") or p.get(\"started_at\") or 0\n        live = NOW - last < ACTIVE or any(not h[\"d\"] for h in helpers)\n        if not live:\n            continue\n        helpers.sort(key=lambda h: (h[\"d\"], -h[\"s\"]))\n        out.append({\"id\": pid, \"p\": profile, \"t\": (p.get(\"title\") or \"New chat\")[:80],\n                    \"src\": p.get(\"source\"), \"a\": int(NOW - last), \"h\": helpers[:8]})\n    db.close()\n    return out\n\n\nrows = []\nfor name, home in homes():\n    rows.extend(read(name, home))\nrows.sort(key=lambda r: r[\"a\"])\nprint(json.dumps(rows[:20], separators=(\",\", \":\")))\n"
+const PY_SRC = "\"\"\"Agents tab data: running chats per profile with their helper agents, read only from state.db.\"\"\"\nimport json, os, sqlite3, sys, time\nfrom pathlib import Path\n\nHOME = Path(os.environ.get(\"HERMES_HOME\") or Path.home() / \".hermes\")\nNOW = time.time()\nACTIVE = 150      # a chat counts as running if it did something in the last 150 s\nCHILD_LIVE = 900  # an unfinished helper counts as live if it did something in the last 15 min\nDONE_KEEP = 300   # finished helpers stay listed (ticked) for 5 min\n\n\ndef homes():\n    yield \"default\", HOME\n    pdir = HOME / \"profiles\"\n    if pdir.is_dir():\n        for p in sorted(pdir.iterdir()):\n            if (p / \"state.db\").exists():\n                yield p.name, p\n\n\ndef read(profile, home):\n    try:\n        db = sqlite3.connect(f\"file:{home / 'state.db'}?mode=ro\", uri=True, timeout=2)\n    except sqlite3.Error:\n        return []\n    db.row_factory = sqlite3.Row\n    since = NOW - CHILD_LIVE\n    try:\n        kids = db.execute(\n            \"select id, parent_session_id, title, ended_at, last_activity_at, started_at from sessions \"\n            \"where parent_session_id is not null and title like 'Subagent:%' \"\n            \"and coalesce(last_activity_at, started_at) > ?\", (since,)).fetchall()\n        recent = db.execute(\n            \"select id, title, source, last_activity_at, started_at from sessions \"\n            \"where coalesce(last_activity_at, started_at) > ? and coalesce(hidden,0)=0 and coalesce(archived,0)=0 \"\n            \"and (title is null or title not like 'Subagent:%') and source not in ('oneshot','subagent')\",\n            (NOW - ACTIVE,)).fetchall()\n        parents = {r[\"id\"]: dict(r) for r in recent}\n        need = {k[\"parent_session_id\"] for k in kids} - set(parents)\n        for pid in need:\n            r = db.execute(\"select id, title, source, last_activity_at, started_at from sessions where id=?\", (pid,)).fetchone()\n            if r:\n                parents[pid] = dict(r)\n    except sqlite3.Error:\n        return []\n    finally:\n        pass\n    out = []\n    for pid, p in parents.items():\n        helpers = []\n        for k in kids:\n            if k[\"parent_session_id\"] != pid:\n                continue\n            done = k[\"ended_at\"] is not None\n            if done and NOW - k[\"ended_at\"] > DONE_KEEP:\n                continue\n            title = (k[\"title\"] or \"Helper\").replace(\"Subagent:\", \"\", 1).strip().rstrip(\"…\").strip()\n            helpers.append({\"t\": title[:80], \"d\": done, \"s\": int(NOW - (k[\"started_at\"] or NOW))})\n        last = p.get(\"last_activity_at\") or p.get(\"started_at\") or 0\n        live = NOW - last < ACTIVE or any(not h[\"d\"] for h in helpers)\n        if not live:\n            continue\n        helpers.sort(key=lambda h: (h[\"d\"], -h[\"s\"]))\n        out.append({\"id\": pid, \"p\": profile, \"t\": (p.get(\"title\") or \"New chat\")[:80],\n                    \"src\": p.get(\"source\"), \"a\": int(NOW - last), \"h\": helpers[:8]})\n    db.close()\n    return out\n\n\nrows = []\nfor name, home in homes():\n    rows.extend(read(name, home))\nrows.sort(key=lambda r: r[\"a\"])\n\n\n# ---- background agents started outside Hermes chats (Codex / Claude Code / Grok / one-shot Hermes, any user) ----\nimport re, subprocess\n\nAGENT_DIR = Path(\"/home/hermes/.hermes/cache/scratch/agents\")\nBG_DONE_KEEP = 1800  # finished background agents stay listed (ticked) for 30 min\nCLI = [\n    (\"codex\", re.compile(r\"(^|/)codex(\\.js)?\\s+(exec|e)\\b|codex-linux[^ ]*\\s+exec\\b\")),\n    (\"claude\", re.compile(r\"(^|/)claude\\b.*\\s(-p|--print)\\b\")),\n    (\"grok\", re.compile(r\"(^|/)grok\\b.*\\s(--prompt\\S*|-p)\\b\")),\n    (\"hermes\", re.compile(r\"(^|/)hermes\\b.*\\schat\\b.*\\s(-q|--query\\S*)\\b\")),\n    (\"opencode\", re.compile(r\"(^|/)opencode\\b.*\\srun\\b\")),\n]\n\n\ndef _last_progress(log):\n    \"\"\"Last human progress line an agent wrote (Codex prints its message after a 'codex' line).\"\"\"\n    try:\n        with open(log, \"rb\") as f:\n            f.seek(0, 2)\n            f.seek(max(0, f.tell() - 20000))\n            lines = f.read().decode(\"utf-8\", \"replace\").splitlines()\n    except OSError:\n        return \"\"\n    for i in range(len(lines) - 1, 0, -1):\n        if lines[i - 1].strip() == \"codex\" and lines[i].strip():\n            return lines[i].strip()[:160]\n    for line in reversed(lines):\n        s = line.strip()\n        if s and not s.startswith((\"exit \", \"tokens used\")) and not s.replace(\",\", \"\").isdigit():\n            return s[:160]\n    return \"\"\n\n\ndef _unit_of(pid):\n    try:\n        for line in open(f\"/proc/{pid}/cgroup\"):\n            m = re.search(r\"/(agent-[^/]+)\\.service\", line)\n            if m:\n                return m.group(1)\n    except OSError:\n        pass\n    return None\n\n\ndef background():\n    out, seen_units = [], set()\n    try:\n        ps = subprocess.run([\"ps\", \"-eo\", \"pid=,ppid=,etimes=,user=,args=\"], capture_output=True, text=True, timeout=5).stdout\n    except Exception:\n        ps = \"\"\n    procs = []\n    for line in ps.splitlines():\n        parts = line.split(None, 4)\n        if len(parts) < 5:\n            continue\n        pid, ppid, et, user, args = parts\n        if args.startswith((\"timeout \", \"/usr/bin/timeout \", \"bash -c\", \"/bin/sh -c\", \"sh -c\", \"node \")) and \"codex\" not in args.split()[0]:\n            # keep node wrappers of codex/claude, skip shell and timeout wrappers\n            if not args.startswith(\"node \"):\n                continue\n        for kind, rx in CLI:\n            if rx.search(args):\n                procs.append((int(pid), int(ppid), int(et), user, kind, args))\n                break\n    pids = {p[0] for p in procs}\n    for pid, ppid, et, user, kind, args in procs:\n        if ppid in pids:\n            continue  # the outer process already stands for this agent\n        unit = _unit_of(pid)\n        if unit:\n            name = unit[len(\"agent-\"):]\n            seen_units.add(name)\n            detail = _last_progress(AGENT_DIR / f\"{name}.log\")\n            title = f\"{name} ({kind})\"\n        else:\n            detail = re.sub(r\"\\s+\", \" \", args)[:160]\n            title = f\"{kind} agent\" + (\"\" if user == \"hermes\" else f\" · {user}\")\n        out.append({\"t\": title[:80], \"d\": False, \"s\": et, \"x\": detail})\n    # recently finished agent-run units (their log ends with \"exit N\")\n    if AGENT_DIR.is_dir():\n        for log in AGENT_DIR.glob(\"*.log\"):\n            name = log.stem\n            if name in seen_units:\n                continue\n            try:\n                age = NOW - log.stat().st_mtime\n                if age > BG_DONE_KEEP:\n                    continue\n                tail = log.read_bytes()[-400:].decode(\"utf-8\", \"replace\").strip().splitlines()\n            except OSError:\n                continue\n            if not tail or not tail[-1].startswith(\"exit \"):\n                continue\n            out.append({\"t\": f\"{name} ({'ok' if tail[-1] == 'exit 0' else tail[-1]})\"[:80], \"d\": True, \"s\": int(age),\n                        \"x\": _last_progress(log)})\n    out.sort(key=lambda h: (h[\"d\"], h[\"s\"] if h[\"d\"] else -h[\"s\"]))\n    return out[:15]\n\n\ntry:\n    bg = background()\nexcept Exception:\n    bg = []\nrows = rows[:19]\nif bg:\n    rows.append({\"id\": \"__background__\", \"p\": \"default\", \"t\": \"Background agents\", \"src\": \"background\",\n                 \"a\": 0 if any(not h[\"d\"] for h in bg) else min(h[\"s\"] for h in bg), \"h\": bg, \"bg\": True})\nprint(json.dumps(rows, separators=(\",\", \":\")))\n"
 const DIR = '"$HOME/.hermes/agents-tab"'
 const $none = atom(null)
 const st = name => host.state?.[name] || $none
@@ -130,6 +132,39 @@ function Chat({ row, state, focused, bot }) {
   })
 }
 
+function Background({ row }) {
+  const n = row.h.length
+  return jsx(Fragment, {
+    children: row.h.map((h, i) =>
+      jsxs(
+        'div',
+        {
+          className: ROW,
+          title: h.x ? `${h.t}\n${h.x}` : h.t,
+          children: [
+            jsx('span', {
+              className: 'shrink-0 whitespace-pre pl-1 font-mono text-[0.75rem] leading-none text-(--ui-text-quaternary)',
+              children: i === n - 1 ? '└─' : '├─'
+            }),
+            h.d
+              ? jsx('span', { className: `${LEAD} text-[0.65rem] text-(--ui-green,#55a583)`, children: '✓' })
+              : jsx(Dot, { state: 'working' }),
+            jsxs('span', {
+              className: `${LABEL} text-(--ui-text-tertiary)`,
+              children: [
+                h.t,
+                h.x ? jsx('span', { className: 'block truncate text-[0.6875rem] text-(--ui-text-quaternary)', children: h.x }) : null
+              ]
+            }),
+            jsx('span', { className: AGE, children: h.d ? 'done' : fmt(h.s) })
+          ]
+        },
+        i
+      )
+    )
+  })
+}
+
 function AgentsTab() {
   const busy = useValue(st('busyBySession')) || {}
   const focusedStored = useValue(st('focusedStoredSessionId'))
@@ -140,10 +175,12 @@ function AgentsTab() {
   const stateOf = row => {
     const live = row.p === 'default' ? byKey[row.id] : null
     if (live && String(live.status) === 'waiting') return 'needs'
+    if (row.bg) return 'idle'
     if ((live && (busy[live.id] || ['working', 'streaming', 'starting'].includes(String(live.status)))) || row.h.some(h => !h.d) || row.a < 20) return 'working'
     return 'idle'
   }
-  const chats = rows.filter(r => r.p === 'default')
+  const bgRow = rows.find(r => r.bg)
+  const chats = rows.filter(r => r.p === 'default' && !r.bg)
   const bots = rows.filter(r => r.p !== 'default')
   const empty = text =>
     jsxs('div', { className: ROW, children: [jsx('span', { className: LEAD }), jsx('span', { className: `${LABEL} text-(--ui-text-quaternary)`, children: text })] })
@@ -153,7 +190,9 @@ function AgentsTab() {
       jsx(Section, { label: 'Running' }),
       error ? empty(String(error.message || error)) : chats.length ? chats.map(r => jsx(Chat, { row: r, state: stateOf(r), focused: r.id === focusedStored }, r.id)) : empty('Nothing running'),
       jsx(Section, { label: 'Bots' }),
-      bots.length ? bots.map(r => jsx(Chat, { row: r, state: stateOf(r), focused: r.id === focusedStored, bot: true }, `${r.p}:${r.id}`)) : empty('All bots idle')
+      bots.length ? bots.map(r => jsx(Chat, { row: r, state: stateOf(r), focused: r.id === focusedStored, bot: true }, `${r.p}:${r.id}`)) : empty('All bots idle'),
+      jsx(Section, { label: 'Background agents' }),
+      bgRow ? jsx(Background, { row: bgRow }) : empty('No background agents')
     ]
   })
 }
