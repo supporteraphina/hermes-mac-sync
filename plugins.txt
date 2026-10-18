@@ -6,6 +6,7 @@
 keep agent-teams supporteraphina/hermes-agent-teams/agent-teams
 keep usage-tracker supporteraphina/hermes-usage-tracker/usage-tracker
 keep vps-browser supporteraphina/hermes-vps-browser/vps-browser
+keep rail-tidy supporteraphina/hermes-mac-sync/rail-tidy
 
 remove session-panel
 remove agents-panel
