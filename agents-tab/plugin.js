@@ -1,0 +1,173 @@
+/**
+ * Agents tab: a SESSIONS | BOTS | AGENTS sidebar tab with every running chat and bot on the
+ * backend, each with its helper agents drawn as a tree underneath. Click a row to open the chat.
+ * Data: agents.py (embedded below, written to ~/.hermes/agents-tab/ on the backend) reads each
+ * profile's state.db read only; session.active_list adds working / needs you for live chats.
+ */
+import { host, useQuery, useValue, atom } from '@hermes/plugin-sdk'
+import { jsx, jsxs, Fragment } from 'react/jsx-runtime'
+
+const ID = 'agents-tab'
+const PY_SRC = "\"\"\"Agents tab data: running chats per profile with their helper agents, read only from state.db.\"\"\"\nimport json, os, sqlite3, sys, time\nfrom pathlib import Path\n\nHOME = Path(os.environ.get(\"HERMES_HOME\") or Path.home() / \".hermes\")\nNOW = time.time()\nACTIVE = 150      # a chat counts as running if it did something in the last 150 s\nCHILD_LIVE = 900  # an unfinished helper counts as live if it did something in the last 15 min\nDONE_KEEP = 300   # finished helpers stay listed (ticked) for 5 min\n\n\ndef homes():\n    yield \"default\", HOME\n    pdir = HOME / \"profiles\"\n    if pdir.is_dir():\n        for p in sorted(pdir.iterdir()):\n            if (p / \"state.db\").exists():\n                yield p.name, p\n\n\ndef read(profile, home):\n    try:\n        db = sqlite3.connect(f\"file:{home / 'state.db'}?mode=ro\", uri=True, timeout=2)\n    except sqlite3.Error:\n        return []\n    db.row_factory = sqlite3.Row\n    since = NOW - CHILD_LIVE\n    try:\n        kids = db.execute(\n            \"select id, parent_session_id, title, ended_at, last_activity_at, started_at from sessions \"\n            \"where parent_session_id is not null and title like 'Subagent:%' \"\n            \"and coalesce(last_activity_at, started_at) > ?\", (since,)).fetchall()\n        recent = db.execute(\n            \"select id, title, source, last_activity_at, started_at from sessions \"\n            \"where coalesce(last_activity_at, started_at) > ? and coalesce(hidden,0)=0 and coalesce(archived,0)=0 \"\n            \"and (title is null or title not like 'Subagent:%') and source not in ('oneshot','subagent')\",\n            (NOW - ACTIVE,)).fetchall()\n        parents = {r[\"id\"]: dict(r) for r in recent}\n        need = {k[\"parent_session_id\"] for k in kids} - set(parents)\n        for pid in need:\n            r = db.execute(\"select id, title, source, last_activity_at, started_at from sessions where id=?\", (pid,)).fetchone()\n            if r:\n                parents[pid] = dict(r)\n    except sqlite3.Error:\n        return []\n    finally:\n        pass\n    out = []\n    for pid, p in parents.items():\n        helpers = []\n        for k in kids:\n            if k[\"parent_session_id\"] != pid:\n                continue\n            done = k[\"ended_at\"] is not None\n            if done and NOW - k[\"ended_at\"] > DONE_KEEP:\n                continue\n            title = (k[\"title\"] or \"Helper\").replace(\"Subagent:\", \"\", 1).strip().rstrip(\"\u2026\").strip()\n            helpers.append({\"t\": title[:80], \"d\": done, \"s\": int(NOW - (k[\"started_at\"] or NOW))})\n        last = p.get(\"last_activity_at\") or p.get(\"started_at\") or 0\n        live = NOW - last < ACTIVE or any(not h[\"d\"] for h in helpers)\n        if not live:\n            continue\n        helpers.sort(key=lambda h: (h[\"d\"], -h[\"s\"]))\n        out.append({\"id\": pid, \"p\": profile, \"t\": (p.get(\"title\") or \"New chat\")[:80],\n                    \"src\": p.get(\"source\"), \"a\": int(NOW - last), \"h\": helpers[:8]})\n    db.close()\n    return out\n\n\nrows = []\nfor name, home in homes():\n    rows.extend(read(name, home))\nrows.sort(key=lambda r: r[\"a\"])\nprint(json.dumps(rows[:20], separators=(\",\", \":\")))\n"
+const DIR = '"$HOME/.hermes/agents-tab"'
+const $none = atom(null)
+const st = name => host.state?.[name] || $none
+
+const b64 = text => btoa(unescape(encodeURIComponent(text)))
+function hash(text) {
+  let h = 5381
+  for (let i = 0; i < text.length; i++) h = ((h << 5) + h + text.charCodeAt(i)) | 0
+  return (h >>> 0).toString(36)
+}
+
+async function exec(command) {
+  const res = await host.request('shell.exec', { command })
+  if (!res || res.code !== 0) throw new Error((res && (res.stderr || res.stdout)) || 'command failed')
+  return res.stdout || ''
+}
+
+let ready = null
+function ensureScript() {
+  if (!ready) {
+    const v = hash(PY_SRC)
+    ready = exec(
+      `mkdir -p ${DIR} && if [ "$(cat ${DIR}/.v 2>/dev/null)" != "${v}" ]; then ` +
+        `echo ${b64(PY_SRC)} | base64 -d > ${DIR}/agents.py && echo ${v} > ${DIR}/.v; fi; echo ok`
+    ).catch(err => {
+      ready = null
+      throw err
+    })
+  }
+  return ready
+}
+
+async function load() {
+  await ensureScript()
+  const [out, live] = await Promise.all([
+    exec(`env -u PYTHONPATH /usr/bin/python3 ${DIR}/agents.py`),
+    host.request('session.active_list', {}).catch(() => null)
+  ])
+  const rows = JSON.parse(out.trim().split('\n').pop() || '[]')
+  const byKey = {}
+  for (const s of live?.sessions || []) byKey[s.session_key || s.id] = s
+  return { rows, byKey }
+}
+
+const fmt = s => (s < 60 ? `${s}s` : s < 3600 ? `${Math.floor(s / 60)}m` : `${Math.floor(s / 3600)}h`)
+
+const ROW = 'flex min-h-[1.625rem] min-w-0 items-center gap-1.5 rounded-md pl-2 pr-2 py-0.5'
+const LABEL = 'min-w-0 flex-1 truncate leading-[1.35] text-[0.8125rem]'
+const AGE = 'shrink-0 text-[0.6875rem] tabular-nums text-(--ui-text-quaternary)'
+const LEAD = 'grid size-3.5 shrink-0 place-items-center'
+
+function Section({ label }) {
+  return jsx('div', {
+    className: 'flex shrink-0 items-center gap-1 pb-1 pt-3',
+    children: jsxs('span', {
+      className: 'flex min-w-0 items-center gap-2 pl-2 text-[0.64rem] font-semibold uppercase tracking-[0.16em] text-(--theme-primary)',
+      children: [
+        jsx('span', { 'aria-hidden': 'true', className: 'dither inline-block size-2 shrink-0 rounded-[1px]' }),
+        jsx('span', { className: 'min-w-0 truncate leading-none', children: label })
+      ]
+    })
+  })
+}
+
+function Dot({ state }) {
+  const cls =
+    state === 'needs' ? 'bg-amber-500' : state === 'working' ? 'bg-(--ui-accent)' : 'border border-(--ui-text-tertiary)'
+  return jsx('span', { className: LEAD, children: jsx('span', { className: `size-1.5 rounded-full ${cls}` }) })
+}
+
+function open(row) {
+  const opts = row.p && row.p !== 'default' ? { profile: row.p } : {}
+  Promise.resolve(host.openSession?.(row.id, opts)).catch(err =>
+    host.notify?.({ kind: 'error', message: `Could not open chat: ${err?.message || err}` })
+  )
+}
+
+function Chat({ row, state, focused, bot }) {
+  const title = bot ? `${row.p} · ${row.t}` : row.t
+  const right = state === 'needs' ? jsx('span', { className: 'shrink-0 text-[0.6875rem] text-amber-500', children: 'needs you' }) : jsx('span', { className: AGE, children: state === 'working' ? 'now' : fmt(row.a) })
+  const n = row.h.length
+  return jsxs(Fragment, {
+    children: [
+      jsxs('div', {
+        className: `${ROW} cursor-pointer hover:bg-(--ui-row-hover-background) ${focused ? 'bg-(--ui-row-active-background)' : ''}`,
+        onClick: () => open(row),
+        title,
+        children: [jsx(Dot, { state }), jsx('span', { className: `${LABEL} text-(--ui-text-secondary)`, children: title }), right]
+      }),
+      ...row.h.map((h, i) =>
+        jsxs(
+          'div',
+          {
+            className: ROW,
+            title: h.t,
+            children: [
+              jsx('span', {
+                className: 'shrink-0 whitespace-pre pl-1 font-mono text-[0.75rem] leading-none text-(--ui-text-quaternary)',
+                children: i === n - 1 ? '└─' : '├─'
+              }),
+              h.d
+                ? jsx('span', { className: `${LEAD} text-[0.65rem] text-(--ui-green,#55a583)`, children: '✓' })
+                : jsx(Dot, { state: 'working' }),
+              jsx('span', { className: `${LABEL} text-(--ui-text-tertiary)`, children: h.t }),
+              jsx('span', { className: AGE, children: h.d ? 'done' : fmt(h.s) })
+            ]
+          },
+          i
+        )
+      )
+    ]
+  })
+}
+
+function AgentsTab() {
+  const busy = useValue(st('busyBySession')) || {}
+  const focusedStored = useValue(st('focusedStoredSessionId'))
+  const anyBusy = Object.values(busy).some(Boolean)
+  const { data, error } = useQuery({ queryKey: [ID], queryFn: load, refetchInterval: anyBusy ? 3000 : 6000 })
+  const rows = data?.rows || []
+  const byKey = data?.byKey || {}
+  const stateOf = row => {
+    const live = row.p === 'default' ? byKey[row.id] : null
+    if (live && String(live.status) === 'waiting') return 'needs'
+    if ((live && (busy[live.id] || ['working', 'streaming', 'starting'].includes(String(live.status)))) || row.h.some(h => !h.d) || row.a < 20) return 'working'
+    return 'idle'
+  }
+  const chats = rows.filter(r => r.p === 'default')
+  const bots = rows.filter(r => r.p !== 'default')
+  const empty = text =>
+    jsxs('div', { className: ROW, children: [jsx('span', { className: LEAD }), jsx('span', { className: `${LABEL} text-(--ui-text-quaternary)`, children: text })] })
+  return jsxs('div', {
+    className: 'h-full min-h-0 overflow-y-auto px-2 pb-3',
+    children: [
+      jsx(Section, { label: 'Running' }),
+      error ? empty(String(error.message || error)) : chats.length ? chats.map(r => jsx(Chat, { row: r, state: stateOf(r), focused: r.id === focusedStored }, r.id)) : empty('Nothing running'),
+      jsx(Section, { label: 'Bots' }),
+      bots.length ? bots.map(r => jsx(Chat, { row: r, state: stateOf(r), focused: r.id === focusedStored, bot: true }, `${r.p}:${r.id}`)) : empty('All bots idle')
+    ]
+  })
+}
+
+export default {
+  id: ID,
+  name: 'Agents tab',
+  register(ctx) {
+    ctx.register({
+      id: 'pane',
+      area: 'panes',
+      title: 'Agents',
+      data: {
+        placement: 'left',
+        width: '260px',
+        collapsible: true,
+        hideOnly: true,
+        tabTitleText: () => 'Agents',
+        dock: { pane: 'sessions', pos: 'center', enforce: true }
+      },
+      render: () => jsx(AgentsTab, {})
+    })
+  }
+}
